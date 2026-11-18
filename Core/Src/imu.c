@@ -13,6 +13,7 @@
 #define MPU6050_REG_ACCEL_XOUT_H 0x3BU
 #define MPU6050_REG_PWR_MGMT_1  0x6BU
 #define MPU6050_REG_WHO_AM_I    0x75U
+#define MPU6050_DLPF_CFG        0x04U /* 20 Hz；10 Hz 用 0x05U，42 Hz 用 0x03U */
 #define MPU6050_GYRO_LSB_PER_DPS 131.0f
 #define MPU6050_ACCEL_LSB_PER_G 16384.0f
 #define IMU_TILT_FILTER_TAU_S   0.5f
@@ -40,7 +41,7 @@ static uint32_t s_last_tick;//注释：上一次更新的时间戳
 static uint16_t s_still_cnt;//注释：静止计数器，用于判断IMU是否处于静止状态
 static uint16_t s_cool_ms;//注释：冷却时间计数器，用于在大动作后冻结零偏学习
 static uint16_t s_read_err_streak;//注释：连续读取错误计数器，用于判断IMU是否处于错误状态
-static uint8_t s_learn_en = 1U;
+static uint8_t s_learn_en = 0U;
 static uint8_t s_chip_id = 0x68U;
 
 static uint8_t imu_write_reg(uint8_t reg, uint8_t value)
@@ -111,14 +112,15 @@ static uint8_t imu_sensor_init(void)
     HAL_Delay(10U);
 
     if (imu_write_reg(MPU6050_REG_SMPLRT_DIV, 0x00U) != 0U ||
-        imu_write_reg(MPU6050_REG_CONFIG, 0x03U) != 0U ||
+        imu_write_reg(MPU6050_REG_CONFIG, MPU6050_DLPF_CFG) != 0U ||
         imu_write_reg(MPU6050_REG_GYRO_CONFIG, 0x00U) != 0U ||
         imu_write_reg(MPU6050_REG_ACCEL_CONFIG, 0x00U) != 0U) {
         return 1U;
     }
     HAL_Delay(10U);
 
-    if (imu_read_reg(MPU6050_REG_CONFIG, &value) != 0U || value != 0x03U) {
+    if (imu_read_reg(MPU6050_REG_CONFIG, &value) != 0U ||
+        value != MPU6050_DLPF_CFG) {
         return 1U;
     }
     if (imu_read_reg(MPU6050_REG_GYRO_CONFIG, &value) != 0U || value != 0x00U) {
@@ -192,7 +194,7 @@ uint8_t IMU_Init(void)
     s_still_cnt = 0U;
     s_cool_ms = 0U;
     s_read_err_streak = 0U;
-    s_learn_en = 1U;
+    s_learn_en = 0U;
 
     if (imu_sensor_init() != 0U) {
         s_d.state = IMU_STATE_ERROR;

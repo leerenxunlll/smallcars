@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "dma.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usart.h"
@@ -25,10 +26,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "encoder.h"
-#include "motor.h"
-#include "oled.h"
-#include "imu.h"
+#include "task.h"
 #include <stdint.h>
 
 /* USER CODE END Includes */
@@ -61,30 +59,6 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void format_angle(char *text, char axis, float angle)
-{
-  int32_t tenths;
-  uint32_t magnitude;
-
-  if (!(angle >= -180.0f && angle <= 180.0f))
-  {
-    angle = 0.0f;
-  }
-  tenths = (int32_t)(angle * 10.0f + ((angle >= 0.0f) ? 0.5f : -0.5f));
-  magnitude = (uint32_t)((tenths < 0) ? -tenths : tenths);
-
-  text[0] = axis;
-  text[1] = ':';
-  text[2] = ' ';
-  text[3] = (tenths < 0) ? '-' : '+';
-  text[4] = (char)('0' + (magnitude / 1000U));
-  text[5] = (char)('0' + ((magnitude / 100U) % 10U));
-  text[6] = (char)('0' + ((magnitude / 10U) % 10U));
-  text[7] = '.';
-  text[8] = (char)('0' + (magnitude % 10U));
-  text[9] = '\0';
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -93,10 +67,6 @@ static void format_angle(char *text, char axis, float angle)
   */
 int main(void)
 {
-  IMU_Data_t imu_snapshot;
-  float imu_data[3] = {0.0f, 0.0f, 0.0f};
-  char angle_text[10];
-  uint32_t last_oled_update;
 
   /* USER CODE BEGIN 1 */
 
@@ -120,6 +90,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
@@ -135,50 +106,20 @@ int main(void)
   MX_TIM6_Init();
   MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
-  encoder_init();
-  motor_init();
-  if (OLED_Init(&hi2c2) != HAL_OK)
+  if (Task_Init() != HAL_OK)
   {
     Error_Handler();
   }
-  if (IMU_Init() != 0U)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  last_oled_update = HAL_GetTick();
-  IMU_SetBiasLearn(0);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    IMU_Update();
-
-    if ((HAL_GetTick() - last_oled_update) >= 500U)
-    {
-      last_oled_update = HAL_GetTick();
-      IMU_GetData(&imu_snapshot);
-      imu_data[0] = imu_snapshot.roll_deg;
-      imu_data[1] = imu_snapshot.pitch_deg;
-      imu_data[2] = imu_snapshot.yaw_deg;
-
-      OLED_Clear();
-      OLED_ShowString(0, 0, "IMU Angles", OLED_6X8);
-      format_angle(angle_text, 'X', imu_data[0]);
-      OLED_ShowString(0, 16, angle_text, OLED_6X8);
-      format_angle(angle_text, 'Y', imu_data[1]);
-      OLED_ShowString(0, 32, angle_text, OLED_6X8);
-      format_angle(angle_text, 'Z', imu_data[2]);
-      OLED_ShowString(0, 48, angle_text, OLED_6X8);
-      if (OLED_Update() != HAL_OK)
-      {
-        Error_Handler();
-      }
+    if (Task1_Run() == TASK_ERROR)
+    { 
+      
+      Error_Handler();
     }
 
     /* USER CODE END WHILE */

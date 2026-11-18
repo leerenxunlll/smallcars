@@ -5,7 +5,7 @@
 
 #define IMU_SAMPLE_HZ          940U
 #define IMU_CALIB_SAMPLES      500U
-#define IMU_ONLINE_BIAS_ENABLE 1
+#define IMU_ONLINE_BIAS_ENABLE 0
 #define IMU_STILL_GYRO_DPS     0.6f
 #define IMU_STILL_ACCEL_ERR    0.05f
 #define IMU_STILL_TICKS        300U
