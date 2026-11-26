@@ -22,10 +22,10 @@
 
 typedef enum
 {
-  FRAME_HEADER_SLOT = 0xCCU,
-  FRAME_HEADER_LINE  = 0xAA
+  FRAME_HEADER_SLOT = 0xCCU,//解释：帧头车位标识，用于标识接收到的帧是关于车位状态的
+  FRAME_HEADER_LINE  = 0xAA//解释：帧头循迹标识，用于标识接收到的帧是关于循迹误差的
 } FrameHeader_t;
-
+//------------------------------数据解析状态机---------------------------------
 typedef enum
 {
   FRAME_WAIT_HEADER = 0U,//解释：等待帧头状态，表示当前正在等待接收帧的头部信息
@@ -58,7 +58,7 @@ Motor motorRL = {1, BASE_SPEED, 1, 0.15f, 0.05f, 0.0f};
 Motor motorRR = {2, BASE_SPEED, 1, 0.15f, 0.0615f, 0.0f};
 Motor motorFL = {3, BASE_SPEED, 1, 0.132f, 0.04f, 0.0f};
 Motor motorFR = {4, BASE_SPEED, 1, 0.145f, 0.051f, 0.0f};
-static uint8_t line_tracking_active;
+static uint8_t line_tracking_active;//解释：循迹激活标志，用于指示是否启用循迹功能
 static uint8_t task1_finished;
 
 
