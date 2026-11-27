@@ -15,8 +15,8 @@
 #define UART_DMA_BUFFER_SIZE 64U
 #define UART_FIFO_CAPACITY   256U
 //------------------------------电机相关------------------------------------ 
-#define BASE_SPEED 150
-#define LINE_STEERING_GAIN 0.0f//解释：循迹转向增益，用于调整循迹误差对电机速度的影响程度
+#define BASE_SPEED 120
+#define LINE_STEERING_GAIN 0.9f//解释：循迹转向增益，用于调整循迹误差对电机速度的影响程度
 #define ahead 1
 #define back 0
 
@@ -95,8 +95,8 @@ static int8_t LineError_Decode(uint8_t raw_error)
 
 static void LineTracking_Apply(void)
 {
-  /* Negative error turns right; positive error turns left. */
-  double correction = -(double)line_error * LINE_STEERING_GAIN;
+  /* Positive error turns right; negative error turns left. */
+  double correction = (double)line_error * LINE_STEERING_GAIN;
   double left_speed = base_speed + correction;
   double right_speed = base_speed - correction;
 

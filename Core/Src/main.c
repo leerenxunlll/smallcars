@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Includes */
 #include "task.h"
 #include "encoder.h"
+#include "imu.h"
 #include <stdint.h>
 #include <stdio.h>
 #include "motor.h"
@@ -46,6 +47,9 @@ extern Motor motorFL;
 extern Motor motorFR;
 extern Motor motorRL;
 extern Motor motorRR;
+#define ROTATE_ANGLE_DEG 45.0f
+#define ROTATE_SPEED_MM_S 250.0
+#define KEY_DEBOUNCE_MS 20U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -76,6 +80,10 @@ void SystemClock_Config(void);
 int main(void)
 {
   uint32_t last_encoder_print_tick;
+  uint32_t key_debounce_tick;
+  IMU_Data_t imu_data;
+  float start_yaw;
+  float angle_diff;
 
   /* USER CODE BEGIN 1 */
 
@@ -128,6 +136,15 @@ int main(void)
 //Motor motorFL = {3, 200, 1, 0.132f, 0.04f, 0.0f};
 //Motor motorFR = {4, 200, 0, 0.145f, 0.051f, 0.0f};
 printf("successful initialization\n");
+  motorFL.speed = 0.0;
+  motorFR.speed = 0.0;
+  motorRL.speed = 0.0;
+  motorRR.speed = 0.0;
+  motor_run(motorFL);
+  motor_run(motorFR);
+  motor_run(motorRL);
+  motor_run(motorRR);
+
   last_encoder_print_tick = HAL_GetTick();
   while (1)
   {
@@ -147,6 +164,74 @@ printf("successful initialization\n");
     //  printf("Task1_Run() returned TASK_ERROR\n");
       //Error_Handler();
     //}
+
+    IMU_Update();
+    if (key1_read == GPIO_PIN_RESET)
+    {
+      key_debounce_tick = HAL_GetTick();
+      while ((uint32_t)(HAL_GetTick() - key_debounce_tick) < KEY_DEBOUNCE_MS)
+      {
+        IMU_Update();
+        HAL_Delay(1U);
+      }
+
+      if (key1_read == GPIO_PIN_RESET)
+      {
+        IMU_GetData(&imu_data);
+        start_yaw = imu_data.yaw_cont_deg;
+
+        motorFL.speed = ROTATE_SPEED_MM_S;
+        motorRL.speed = ROTATE_SPEED_MM_S;
+        motorFR.speed = ROTATE_SPEED_MM_S;
+        motorRR.speed = ROTATE_SPEED_MM_S;
+        motorFL.dir = 1;
+        motorRL.dir = 1;
+        motorFR.dir = 0;
+        motorRR.dir = 0;
+
+        while (1)
+        {
+          IMU_Update();
+          IMU_GetData(&imu_data);
+          angle_diff = imu_data.yaw_cont_deg - start_yaw;
+          if (angle_diff >= ROTATE_ANGLE_DEG ||
+              angle_diff <= -ROTATE_ANGLE_DEG)
+          {
+            break;
+          }
+
+          motor_pid_run(motorFL);
+          motor_pid_run(motorRL);
+          motor_pid_run(motorFR);
+          motor_pid_run(motorRR);
+        }
+
+        motorFL.speed = 0.0;
+        motorFR.speed = 0.0;
+        motorRL.speed = 0.0;
+        motorRR.speed = 0.0;
+        motor_run(motorFL);
+        motor_run(motorFR);
+        motor_run(motorRL);
+        motor_run(motorRR);
+
+        do
+        {
+          while (key1_read == GPIO_PIN_RESET)
+          {
+            IMU_Update();
+            HAL_Delay(1U);
+          }
+          key_debounce_tick = HAL_GetTick();
+          while ((uint32_t)(HAL_GetTick() - key_debounce_tick) <
+                 KEY_DEBOUNCE_MS)
+          {
+            IMU_Update();
+            HAL_Delay(1U);
+          }
+        } while (key1_read == GPIO_PIN_RESET);
+      }
+    }
 
     now = HAL_GetTick();
     if ((uint32_t)(now - last_encoder_print_tick) >= 1000U)
