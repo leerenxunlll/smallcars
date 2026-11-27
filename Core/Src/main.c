@@ -28,11 +28,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "task.h"
-#include "encoder.h"
 #include "imu.h"
-#include <stdint.h>
-#include <stdio.h>
 #include "motor.h"
+#include <stdint.h>
 
 /* USER CODE END Includes */
 
@@ -43,12 +41,16 @@ all_task_state_t current_task_state=SELECT_TASK;//创建全局变量，表示当
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-extern Motor motorFL;
-extern Motor motorFR;
-extern Motor motorRL;
-extern Motor motorRR;
-#define ROTATE_ANGLE_DEG 45.0f
-#define ROTATE_SPEED_MM_S 250.0
+#define MOTOR_DIR_FORWARD 1
+#define MOTOR_DIR_BACKWARD 0
+#define BASE_SPEED 120
+
+#define FIRST_ROTATE_TARGET_ANGLE_DEG 45.0f
+#define TOTAL_ROTATE_TARGET_ANGLE_DEG 90.0f
+#define MOVE_DISTANCE_MM 100.0f
+#define FINAL_FORWARD_DISTANCE_MM 250.0f
+#define MOVE_TIMEOUT_MS 10000U
+#define ROTATE_STAGE_TIMEOUT_MS 10000U
 #define KEY_DEBOUNCE_MS 20U
 /* USER CODE END PD */
 
@@ -60,7 +62,15 @@ extern Motor motorRR;
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static const Motor motorRL_phase1 = {1, BASE_SPEED+50, 1, 0.15f, 0.05f, 0.0f};
+static const Motor motorRR_phase1 = {2, BASE_SPEED+100, 0, 1.5f, 0.0615f, 0.0f};
+static const Motor motorFL_phase1 = {3, BASE_SPEED+50, 1, 0.132f, 0.04f, 0.0f};
+static const Motor motorFR_phase1 = {4, 0, 0, 0.0f, 0.0f, 0.0f};
 
+static const Motor motorRL_phase2 = {1, BASE_SPEED+50, 1, 0.15f, 0.05f, 0.0f};
+static const Motor motorRR_phase2 = {2, BASE_SPEED+100, 0, 1.5f, 0.0615f, 0.0f};
+static const Motor motorFL_phase2 = {3, BASE_SPEED+100, 1, 0.132f, 0.04f, 0.0f};
+static const Motor motorFR_phase2 = {4, 0, 0, 0.0f, 0.0f, 0.0f};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,6 +81,146 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+extern Motor motorFL;
+extern Motor motorFR;
+extern Motor motorRL;
+extern Motor motorRR;
+
+static void Apply_Motor_Settings(Motor *motor, const Motor *settings)
+{
+  motor->speed = settings->speed;
+  motor->dir = settings->dir;
+  motor->p = settings->p;
+  motor->i = settings->i;
+  motor->d = settings->d;
+}
+
+static void Apply_Rotation_Settings(const Motor *rl,
+                                   const Motor *rr,
+                                   const Motor *fl,
+                                   const Motor *fr)
+{
+  Apply_Motor_Settings(&motorRL, rl);
+  Apply_Motor_Settings(&motorRR, rr);
+  Apply_Motor_Settings(&motorFL, fl);
+  Apply_Motor_Settings(&motorFR, fr);
+}
+
+static void Stop_Test_Motors(void)
+{
+  motorRL.speed = 0.0;
+  motorRR.speed = 0.0;
+  motorFL.speed = 0.0;
+  motorFR.speed = 0.0;
+  motor_run(motorRL);
+  motor_run(motorRR);
+  motor_run(motorFL);
+  motor_run(motorFR);
+  HAL_Delay(10U);
+  motor_pid_run(motorRL);
+  motor_pid_run(motorRR);
+  motor_pid_run(motorFL);
+  motor_pid_run(motorFR);
+}
+
+static uint8_t Rotate_To_Angle(float start_yaw,
+                               float target_angle_deg,
+                               const Motor *rl,
+                               const Motor *rr,
+                               const Motor *fl,
+                               const Motor *fr)
+{
+  IMU_Data_t imu_data;
+  float angle_diff;
+  uint8_t completed = 0U;
+  uint32_t start_tick = HAL_GetTick();
+
+  if ((IMU_IsReady() == 0U) || (target_angle_deg == 0.0f))
+  {
+    return 0U;
+  }
+
+  Apply_Rotation_Settings(rl, rr, fl, fr);
+
+  while ((uint32_t)(HAL_GetTick() - start_tick) < ROTATE_STAGE_TIMEOUT_MS)
+  {
+    IMU_Update();
+    if (IMU_IsReady() == 0U)
+    {
+      break;
+    }
+
+    IMU_GetData(&imu_data);
+    angle_diff = imu_data.yaw_cont_deg - start_yaw;
+
+    if ((target_angle_deg > 0.0f && angle_diff >= target_angle_deg) ||
+        (target_angle_deg < 0.0f && angle_diff <= target_angle_deg))
+    {
+      completed = 1U;
+      break;
+    }
+
+    motor_pid_run(motorRL);
+    motor_pid_run(motorRR);
+    motor_pid_run(motorFL);
+    motor_pid_run(motorFR);
+    HAL_Delay(1U);
+  }
+
+  Stop_Test_Motors();
+
+  return completed;
+}
+
+static uint8_t Motor_Angle_Sequence(void)
+{
+  IMU_Data_t imu_data;
+  float start_yaw;
+  float angle_diff;
+
+  if (IMU_IsReady() == 0U)
+  {
+    return 0U;
+  }
+
+  IMU_Update();
+  IMU_GetData(&imu_data);
+  start_yaw = imu_data.yaw_cont_deg;
+
+  if (Rotate_To_Angle(start_yaw, FIRST_ROTATE_TARGET_ANGLE_DEG,
+                      &motorRL_phase1, &motorRR_phase1,
+                      &motorFL_phase1, &motorFR_phase1) == 0U)
+  {
+    return 0U;
+  }
+
+  if (Task_MoveDistance(TASK_MOVE_FORWARD, MOVE_DISTANCE_MM,
+                        MOVE_TIMEOUT_MS) != TASK_MOVE_SUCCESS)
+  {
+    Stop_Test_Motors();
+    return 0U;
+  }
+
+  IMU_Update();
+  IMU_GetData(&imu_data);
+  angle_diff = imu_data.yaw_cont_deg - start_yaw;
+  if (angle_diff < TOTAL_ROTATE_TARGET_ANGLE_DEG &&
+      Rotate_To_Angle(start_yaw, TOTAL_ROTATE_TARGET_ANGLE_DEG,
+                      &motorRL_phase2, &motorRR_phase2,
+                      &motorFL_phase2, &motorFR_phase2) == 0U)
+  {
+    return 0U;
+  }
+
+  if (Task_MoveDistance(TASK_MOVE_FORWARD, FINAL_FORWARD_DISTANCE_MM,
+                        MOVE_TIMEOUT_MS) != TASK_MOVE_SUCCESS)
+  {
+    Stop_Test_Motors();
+    return 0U;
+  }
+
+  return 1U;
+}
 /* USER CODE END 0 */
 
 /**
@@ -79,12 +229,6 @@ void SystemClock_Config(void);
   */
 int main(void)
 {
-  uint32_t last_encoder_print_tick;
-  uint32_t key_debounce_tick;
-  IMU_Data_t imu_data;
-  float start_yaw;
-  float angle_diff;
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -129,124 +273,27 @@ int main(void)
   }
   /* USER CODE END 2 */
 
-  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-//Motor motorRL = {1, 200, 1, 0.15f, 0.05f, 0.0f};
-//Motor motorRR = {2, 200, 0, 0.15f, 0.0615f, 0.0f};
-//Motor motorFL = {3, 200, 1, 0.132f, 0.04f, 0.0f};
-//Motor motorFR = {4, 200, 0, 0.145f, 0.051f, 0.0f};
-printf("successful initialization\n");
-  motorFL.speed = 0.0;
-  motorFR.speed = 0.0;
-  motorRL.speed = 0.0;
-  motorRR.speed = 0.0;
-  motor_run(motorFL);
-  motor_run(motorFR);
-  motor_run(motorRL);
-  motor_run(motorRR);
-
-  last_encoder_print_tick = HAL_GetTick();
   while (1)
   {
-    uint32_t now;
-
-    //motor_pid_run(motorFL);
-    //motor_pid_run(motorFR);
-    //motor_pid_run(motorRL);
-    //motor_pid_run(motorRR);
-
-   
-  
-
-
-    //if (Task1_Run() == TASK_ERROR)
-    //{ 
-    //  printf("Task1_Run() returned TASK_ERROR\n");
-      //Error_Handler();
-    //}
-
     IMU_Update();
     if (key1_read == GPIO_PIN_RESET)
     {
-      key_debounce_tick = HAL_GetTick();
-      while ((uint32_t)(HAL_GetTick() - key_debounce_tick) < KEY_DEBOUNCE_MS)
-      {
-        IMU_Update();
-        HAL_Delay(1U);
-      }
-
+      HAL_Delay(KEY_DEBOUNCE_MS);
       if (key1_read == GPIO_PIN_RESET)
       {
-        IMU_GetData(&imu_data);
-        start_yaw = imu_data.yaw_cont_deg;
-
-        motorFL.speed = ROTATE_SPEED_MM_S;
-        motorRL.speed = ROTATE_SPEED_MM_S;
-        motorFR.speed = ROTATE_SPEED_MM_S;
-        motorRR.speed = ROTATE_SPEED_MM_S;
-        motorFL.dir = 1;
-        motorRL.dir = 1;
-        motorFR.dir = 0;
-        motorRR.dir = 0;
-
-        while (1)
+        if (Motor_Angle_Sequence() == 0U)
+        {
+          Error_Handler();
+        }
+        while (key1_read == GPIO_PIN_RESET)
         {
           IMU_Update();
-          IMU_GetData(&imu_data);
-          angle_diff = imu_data.yaw_cont_deg - start_yaw;
-          if (angle_diff >= ROTATE_ANGLE_DEG ||
-              angle_diff <= -ROTATE_ANGLE_DEG)
-          {
-            break;
-          }
-
-          motor_pid_run(motorFL);
-          motor_pid_run(motorRL);
-          motor_pid_run(motorFR);
-          motor_pid_run(motorRR);
+          HAL_Delay(10U);
         }
-
-        motorFL.speed = 0.0;
-        motorFR.speed = 0.0;
-        motorRL.speed = 0.0;
-        motorRR.speed = 0.0;
-        motor_run(motorFL);
-        motor_run(motorFR);
-        motor_run(motorRL);
-        motor_run(motorRR);
-
-        do
-        {
-          while (key1_read == GPIO_PIN_RESET)
-          {
-            IMU_Update();
-            HAL_Delay(1U);
-          }
-          key_debounce_tick = HAL_GetTick();
-          while ((uint32_t)(HAL_GetTick() - key_debounce_tick) <
-                 KEY_DEBOUNCE_MS)
-          {
-            IMU_Update();
-            HAL_Delay(1U);
-          }
-        } while (key1_read == GPIO_PIN_RESET);
       }
     }
-
-    now = HAL_GetTick();
-    if ((uint32_t)(now - last_encoder_print_tick) >= 1000U)
-    {
-      last_encoder_print_tick = now;
-      printf("motorRL:%+ld mm/s\n",
-             (long)encoder_get_speed(1));
-            
-    }
-
-
     /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-   
   }
   /* USER CODE END 3 */
 }

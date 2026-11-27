@@ -19,6 +19,9 @@
 #define LINE_STEERING_GAIN 0.9f//解释：循迹转向增益，用于调整循迹误差对电机速度的影响程度
 #define ahead 1
 #define back 0
+#define DISTANCE_MOVE_SPEED_MM_S 100.0f
+#define DISTANCE_ENCODER_COUNTS_PER_WHEEL_REVOLUTION (13U * 4U * 20U)
+#define DISTANCE_ENCODER_WHEEL_CIRCUMFERENCE_MM (3.1415926 * 48.0)
 
 typedef enum
 {
@@ -61,6 +64,173 @@ Motor motorFR = {4, BASE_SPEED, 1, 0.145f, 0.051f, 0.0f};
 static uint8_t line_tracking_active;//解释：循迹激活标志，用于指示是否启用循迹功能
 static uint8_t task1_finished;
 
+
+TaskRotateStatus_t Task_Rotate(TaskRotateDirection_t direction,
+                               float speed_mm_s,
+                               float angle_deg)
+{
+  Motor *motors[4] = {&motorFL, &motorFR, &motorRL, &motorRR};
+  double saved_speed[4];
+  int saved_dir[4];
+  IMU_Data_t imu_data;
+  float start_yaw;
+  float angle_diff;
+  uint8_t i;
+
+  if ((direction != TASK_ROTATE_LEFT && direction != TASK_ROTATE_RIGHT) ||
+      !(speed_mm_s > 0.0f) ||
+      !(angle_deg > 0.0f))
+  {
+    return TASK_ROTATE_INVALID_ARGUMENT;
+  }
+  if (IMU_IsReady() == 0U)
+  {
+    return TASK_ROTATE_IMU_ERROR;
+  }
+
+  for (i = 0U; i < 4U; ++i)
+  {
+    saved_speed[i] = motors[i]->speed;
+    saved_dir[i] = motors[i]->dir;
+  }
+
+  IMU_GetData(&imu_data);
+  start_yaw = imu_data.yaw_cont_deg;
+
+  for (i = 0U; i < 4U; ++i)
+  {
+    motors[i]->speed = speed_mm_s;
+  }
+  motors[0]->dir = (direction == TASK_ROTATE_LEFT) ? 1 : 0;
+  motors[2]->dir = motors[0]->dir;
+  motors[1]->dir = (direction == TASK_ROTATE_LEFT) ? 0 : 1;
+  motors[3]->dir = motors[1]->dir;
+
+  while (1)
+  {
+    IMU_Update();
+    if (IMU_IsReady() == 0U)
+    {
+      break;
+    }
+
+    IMU_GetData(&imu_data);
+    angle_diff = imu_data.yaw_cont_deg - start_yaw;
+    if (angle_diff >= angle_deg ||
+        angle_diff <= -angle_deg)
+    {
+      break;
+    }
+
+    motor_pid_run(motorFL);
+    motor_pid_run(motorRL);
+    motor_pid_run(motorFR);
+    motor_pid_run(motorRR);
+  }
+
+  for (i = 0U; i < 4U; ++i)
+  {
+    motors[i]->speed = 0.0;
+    motor_run(*motors[i]);
+  }
+  for (i = 0U; i < 4U; ++i)
+  {
+    motors[i]->speed = saved_speed[i];
+    motors[i]->dir = saved_dir[i];
+  }
+
+  return (IMU_IsReady() != 0U) ? TASK_ROTATE_SUCCESS : TASK_ROTATE_IMU_ERROR;
+}
+
+static int64_t Encoder_ReadForwardDelta(TIM_HandleTypeDef *timer,
+                                        uint32_t *previous_count,
+                                        int8_t forward_count_sign)
+{
+  uint32_t current_count = __HAL_TIM_GET_COUNTER(timer);
+  uint64_t counter_modulus = (uint64_t)__HAL_TIM_GET_AUTORELOAD(timer) + 1U;
+  int64_t count_delta = (int64_t)current_count - (int64_t)*previous_count;
+
+  if (count_delta > (int64_t)(counter_modulus / 2U))
+  {
+    count_delta -= (int64_t)counter_modulus;
+  }
+  else if (count_delta < -(int64_t)(counter_modulus / 2U))
+  {
+    count_delta += (int64_t)counter_modulus;
+  }
+
+  *previous_count = current_count;
+  return count_delta * forward_count_sign;
+}
+
+TaskMoveStatus_t Task_MoveDistance(TaskMoveDirection_t direction,
+                                   float distance_mm,
+                                   uint32_t timeout_ms)
+{
+  Motor *motors[4] = {&motorFL, &motorFR, &motorRL, &motorRR};
+  int saved_dir[4];
+  uint32_t previous_rl = __HAL_TIM_GET_COUNTER(&htim5);
+  uint32_t previous_rr = __HAL_TIM_GET_COUNTER(&htim3);
+  uint32_t previous_fl = __HAL_TIM_GET_COUNTER(&htim8);
+  uint32_t previous_fr = __HAL_TIM_GET_COUNTER(&htim4);
+  uint32_t start_tick;
+  int8_t travel_direction_sign;
+  int64_t total_travel_counts = 0;
+  double travelled_mm = 0.0;
+  uint8_t i;
+
+  if ((direction != TASK_MOVE_FORWARD && direction != TASK_MOVE_BACKWARD) ||
+      !(distance_mm > 0.0f) ||
+      (timeout_ms == 0U))
+  {
+    return TASK_MOVE_INVALID_ARGUMENT;
+  }
+
+  travel_direction_sign = (direction == TASK_MOVE_FORWARD) ? 1 : -1;
+  for (i = 0U; i < 4U; ++i)
+  {
+    saved_dir[i] = motors[i]->dir;
+    motors[i]->dir = (direction == TASK_MOVE_FORWARD) ? 1 : 0;
+    motors[i]->speed = DISTANCE_MOVE_SPEED_MM_S;
+  }
+  start_tick = HAL_GetTick();
+
+  while (travelled_mm < (double)distance_mm &&
+         (uint32_t)(HAL_GetTick() - start_tick) < timeout_ms)
+  {
+    motor_pid_run(motorFL);
+    motor_pid_run(motorFR);
+    motor_pid_run(motorRL);
+    motor_pid_run(motorRR);
+    IMU_Update();
+
+    total_travel_counts +=
+        Encoder_ReadForwardDelta(&htim5, &previous_rl, -1) +
+        Encoder_ReadForwardDelta(&htim3, &previous_rr, 1) +
+        Encoder_ReadForwardDelta(&htim8, &previous_fl, -1) +
+        Encoder_ReadForwardDelta(&htim4, &previous_fr, -1);
+    travelled_mm = ((double)total_travel_counts / 4.0) *
+                   DISTANCE_ENCODER_WHEEL_CIRCUMFERENCE_MM /
+                   DISTANCE_ENCODER_COUNTS_PER_WHEEL_REVOLUTION *
+                   travel_direction_sign;
+  }
+
+  for (i = 0U; i < 4U; ++i)
+  {
+    motors[i]->speed = 0.0;
+    motor_run(*motors[i]);
+    motors[i]->dir = saved_dir[i];
+  }
+  HAL_Delay(10U);
+  motor_pid_run(motorFL);
+  motor_pid_run(motorFR);
+  motor_pid_run(motorRL);
+  motor_pid_run(motorRR);
+
+  return (travelled_mm >= (double)distance_mm)
+             ? TASK_MOVE_SUCCESS
+             : TASK_MOVE_TIMEOUT;
+}
 
 static uint16_t UartFifo_Next(uint16_t index)
 {
