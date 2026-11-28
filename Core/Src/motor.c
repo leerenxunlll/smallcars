@@ -2,10 +2,34 @@
 #include "encoder.h"
 #include "tim.h"
 #include "main.h"
+#include "task.h"
+#include "imu.h"
 
 #define MOTOR_PWM_FULL_SCALE_PERCENT 100.0f
 #define MOTOR_SPEED_SAMPLE_PERIOD_MS 10U
 #define MOTOR_COUNT 4U
+#define PARKING_BASE_SPEED 120
+#define PARKING_INITIAL_TURN_DEG 45.0f
+#define PARKING_TARGET_TURN_DEG 90.0f
+#define PARKING_APPROACH_DISTANCE_MM 100.0f
+#define PARKING_FINAL_DISTANCE_MM 250.0f
+#define PARKING_MOVE_TIMEOUT_MS 10000U
+#define PARKING_ROTATE_TIMEOUT_MS 10000U
+
+typedef enum {
+    PARKING_ROTATE_CLOCKWISE = 1,
+    PARKING_ROTATE_COUNTERCLOCKWISE = -1
+} ParkingRotationDirection_t;
+
+typedef enum {
+    PARKING_TRAVEL_FORWARD = 0,
+    PARKING_TRAVEL_BACKWARD
+} ParkingTravelDirection_t;
+
+extern Motor motorRL;
+extern Motor motorRR;
+extern Motor motorFL;
+extern Motor motorFR;
 
 typedef struct {
     float integral;
@@ -264,5 +288,203 @@ void motor_pid_run(Motor motor)
     state->previous_measurement = measured_speed;
     motor.speed = output;
     motor_run(motor);
+}
+
+static void Parking_StopMotors(void)
+{
+    motorRL.speed = 0.0;
+    motorRR.speed = 0.0;
+    motorFL.speed = 0.0;
+    motorFR.speed = 0.0;
+    motor_run(motorRL);
+    motor_run(motorRR);
+    motor_run(motorFL);
+    motor_run(motorFR);
+    HAL_Delay(10U);
+    motor_pid_run(motorRL);
+    motor_pid_run(motorRR);
+    motor_pid_run(motorFL);
+    motor_pid_run(motorFR);
+}
+
+static void Parking_ApplyTaskMotorSettings(void)
+{
+    motorRL = (Motor){1, 0.0, 1, 0.15f, 0.05f, 0.0f};
+    motorRR = (Motor){2, 0.0, 1, 0.15f, 0.0615f, 0.0f};
+    motorFL = (Motor){3, 0.0, 1, 0.132f, 0.04f, 0.0f};
+    motorFR = (Motor){4, 0.0, 1, 0.145f, 0.051f, 0.0f};
+}
+
+static void Parking_RestoreTaskMotorSettings(void)
+{
+    Parking_ApplyTaskMotorSettings();
+    Parking_StopMotors();
+}
+//顺时针向前转动
+static void Parking_ApplyClockwiseForwardSettings(void)
+{
+    motorRL = (Motor){1, PARKING_BASE_SPEED + 50, 1, 0.15f, 0.05f, 0.0f};
+    motorRR = (Motor){2, PARKING_BASE_SPEED + 100, 0, 1.5f, 0.0615f, 0.0f};
+    motorFL = (Motor){3, PARKING_BASE_SPEED + 50, 1, 0.132f, 0.04f, 0.0f};
+    motorFR = (Motor){4, 0.0, 0, 0.0f, 0.0f, 0.0f};
+}
+
+static void Parking_ApplyCounterclockwiseBackwardSettings(void)
+{
+    motorRL = (Motor){1, PARKING_BASE_SPEED + 50, 0, 0.15f, 0.05f, 0.0f};
+    motorRR = (Motor){2, 0, 0, 0.0f, 0.0f, 0.0f};
+    motorFL = (Motor){3, PARKING_BASE_SPEED + 50, 0, 0.132f, 0.04f, 0.0f};
+    motorFR = (Motor){4, PARKING_BASE_SPEED + 100, 1, 1.45f, 0.051f, 0.0f};
+}
+
+static void Parking_ApplyClockwiseBackwardSettings(void)
+{
+    motorRL = (Motor){1, 0, 0, 0.0f, 0.0f, 0.0f};
+    motorRR = (Motor){2, PARKING_BASE_SPEED + 50, 0, 0.15f, 0.0615f, 0.0f};
+    motorFL = (Motor){3, PARKING_BASE_SPEED + 100, 1, 1.32f, 0.04f, 0.0f};
+    motorFR = (Motor){4, PARKING_BASE_SPEED + 50, 0, 0.145f, 0.051f, 0.0f};
+}
+
+static void Parking_ApplyCounterclockwiseForwardSettings(void)
+{
+    motorRL = (Motor){1, PARKING_BASE_SPEED + 100, 0, 1.5f, 0.05f, 0.0f};
+    motorRR = (Motor){2, PARKING_BASE_SPEED + 50, 1, 0.15f, 0.0615f, 0.0f};
+    motorFL = (Motor){3, 0, 0, 0.0f, 0.0f, 0.0f};
+    motorFR = (Motor){4, PARKING_BASE_SPEED + 50, 1, 0.145f, 0.051f, 0.0f};
+}
+
+static void Parking_ApplyRotationSettings(
+    ParkingRotationDirection_t rotation_direction,
+    ParkingTravelDirection_t travel_direction)
+{
+    if (rotation_direction == PARKING_ROTATE_CLOCKWISE) {
+        if (travel_direction == PARKING_TRAVEL_FORWARD) {
+            Parking_ApplyClockwiseForwardSettings();
+        } else {
+            Parking_ApplyClockwiseBackwardSettings();
+        }
+    } else if (travel_direction == PARKING_TRAVEL_FORWARD) {
+        Parking_ApplyCounterclockwiseForwardSettings();
+    } else {
+        Parking_ApplyCounterclockwiseBackwardSettings();
+    }
+}
+
+static float Parking_GetDirectedAngleDifference(float start_yaw,
+                                                float current_yaw,
+                                                ParkingRotationDirection_t
+                                                    rotation_direction)
+{
+    float angle_difference = current_yaw - start_yaw;
+
+    return (rotation_direction == PARKING_ROTATE_CLOCKWISE)
+               ? angle_difference
+               : -angle_difference;
+}
+
+static TaskParkingStatus_t Parking_RotateToAngle(
+    float start_yaw,
+    float target_angle_deg,
+    ParkingRotationDirection_t rotation_direction)
+{
+    IMU_Data_t imu_data;
+    uint32_t start_tick = HAL_GetTick();
+    float angle_diff;
+
+    while ((uint32_t)(HAL_GetTick() - start_tick) <
+           PARKING_ROTATE_TIMEOUT_MS) {
+        IMU_Update();
+        if (IMU_IsReady() == 0U) {
+            Parking_StopMotors();
+            return TASK_PARKING_IMU_ERROR;
+        }
+
+        IMU_GetData(&imu_data);
+        angle_diff = Parking_GetDirectedAngleDifference(
+            start_yaw, imu_data.yaw_cont_deg, rotation_direction);
+        if (angle_diff >= target_angle_deg) {
+            Parking_StopMotors();
+            return TASK_PARKING_SUCCESS;
+        }
+
+        motor_pid_run(motorRL);
+        motor_pid_run(motorRR);
+        motor_pid_run(motorFL);
+        motor_pid_run(motorFR);
+        HAL_Delay(1U);
+    }
+
+    Parking_StopMotors();
+    return TASK_PARKING_ROTATE_TIMEOUT;
+}
+
+TaskParkingStatus_t Task_ReverseParking(void)
+{
+    IMU_Data_t imu_data;
+    TaskParkingStatus_t status;
+    float start_yaw;
+    float angle_diff;
+    const ParkingRotationDirection_t rotation_direction =
+        PARKING_ROTATE_COUNTERCLOCKWISE;
+    const ParkingTravelDirection_t rotation_travel_direction =
+        PARKING_TRAVEL_BACKWARD;
+
+    if (IMU_IsReady() == 0U) {
+        Parking_RestoreTaskMotorSettings();
+        return TASK_PARKING_IMU_ERROR;
+    }
+
+    IMU_Update();
+    IMU_GetData(&imu_data);
+    start_yaw = imu_data.yaw_cont_deg;
+
+    Parking_ApplyRotationSettings(rotation_direction,
+                                  rotation_travel_direction);
+    status = Parking_RotateToAngle(start_yaw,
+                                   PARKING_INITIAL_TURN_DEG,
+                                   rotation_direction);
+    if (status != TASK_PARKING_SUCCESS) {
+        Parking_RestoreTaskMotorSettings();
+        return status;
+    }
+
+    Parking_ApplyTaskMotorSettings();
+    if (Task_MoveDistance(TASK_MOVE_BACKWARD,
+                          PARKING_APPROACH_DISTANCE_MM,
+                          PARKING_MOVE_TIMEOUT_MS) != TASK_MOVE_SUCCESS) {
+        Parking_RestoreTaskMotorSettings();
+        return TASK_PARKING_MOVE_ERROR;
+    }
+
+    IMU_Update();
+    if (IMU_IsReady() == 0U) {
+        Parking_RestoreTaskMotorSettings();
+        return TASK_PARKING_IMU_ERROR;
+    }
+    IMU_GetData(&imu_data);
+    angle_diff = Parking_GetDirectedAngleDifference(
+        start_yaw, imu_data.yaw_cont_deg, rotation_direction);
+    if (angle_diff < PARKING_TARGET_TURN_DEG) {
+        Parking_ApplyRotationSettings(rotation_direction,
+                                      rotation_travel_direction);
+        status = Parking_RotateToAngle(start_yaw,
+                                       PARKING_TARGET_TURN_DEG,
+                                       rotation_direction);
+        if (status != TASK_PARKING_SUCCESS) {
+            Parking_RestoreTaskMotorSettings();
+            return status;
+        }
+    }
+
+    Parking_ApplyTaskMotorSettings();
+    if (Task_MoveDistance(TASK_MOVE_BACKWARD,
+                          PARKING_FINAL_DISTANCE_MM,
+                          PARKING_MOVE_TIMEOUT_MS) != TASK_MOVE_SUCCESS) {
+        Parking_RestoreTaskMotorSettings();
+        return TASK_PARKING_MOVE_ERROR;
+    }
+
+    Parking_RestoreTaskMotorSettings();
+    return TASK_PARKING_SUCCESS;
 }
 
